@@ -1,6 +1,8 @@
 use bitvec::prelude as bv;
 use huff_coding::prelude::*;
 
+use std::ops::Index;
+
 #[derive(Debug)]
 pub struct Sfdc<L: HuffLetter> {
     text: Vec<L>,
@@ -18,12 +20,13 @@ impl<L: HuffLetter> Sfdc<L> {
         let codes = tree.read_codes();
 
         let max_code_length = codes.values().map(|v| v.len()).max().unwrap();
-        if layers <= 1 || layers > max_code_length {
-            panic!(
-                "Layers must be > 1 and <= max code length! (got layers: {}, max code length: {})",
-                layers, max_code_length
-            );
-        }
+        let layers = if layers <= 1 {
+            2
+        } else if layers > max_code_length {
+            max_code_length
+        } else {
+            layers
+        };
 
         let layers = vec![SfdcLayer::repeat(false, text.len()); layers];
 
@@ -64,7 +67,11 @@ impl<L: HuffLetter> Sfdc<L> {
         }
     }
 
-    pub fn decode(&self, start: usize, end: usize) -> Vec<&L> {
+    pub fn decode_one(&self, index: usize) -> &L {
+        self.decode_range(index, index)[0]
+    }
+
+    pub fn decode_range(&self, start: usize, end: usize) -> Vec<&L> {
         let start = if start >= self.text.len() {
             self.text.len() - 1
         } else {
@@ -101,7 +108,6 @@ impl<L: HuffLetter> Sfdc<L> {
                     if k <= end {
                         found += 1;
                         results[k - start] = x.leaf().letter();
-                        println!("{:?}", results);
                     }
                 } else {
                     pending.push((x, k));
@@ -132,98 +138,101 @@ impl<L: HuffLetter> Sfdc<L> {
     }
 }
 
+impl<L: HuffLetter> Index<usize> for Sfdc<L> {
+    type Output = L;
+    fn index(&self, index: usize) -> &Self::Output {
+        self.decode_one(index)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn it_works_short() {
-        let text = ["C", "o", "m", "p", "r", "e", "s", "s", "i", "o", "n"];
-        let n_layers = 2;
-        let mut sfdc = Sfdc::new(&text, n_layers);
+    fn it_decodes_range() {
+        let texts = vec!["Compression", "The quick brown fox jumps over the lazy dog"];
 
-        assert_eq!(n_layers, sfdc.layers.len());
+        let layers = 2..=5;
 
-        sfdc.encode();
-        for (k, v) in sfdc.tree.read_codes() {
-            println!("{k} {:?}", v.to_string());
+        for n in layers {
+            for t in &texts {
+                let text: Vec<&str> = t.split("").collect();
+                let text = &text[1..text.len() - 1];
+
+                let mut sfdc = Sfdc::new(text, n);
+                sfdc.encode();
+
+                let decoded = sfdc.decode_range(0, text.len());
+                for (i, c) in text.iter().enumerate() {
+                    assert_eq!(c, decoded[i]);
+                }
+            }
         }
-
-        for i in 0..n_layers {
-            println!("(layer {i}): {:?}", sfdc.layers[i]);
-        }
-        println!("(layer d): {:?}", sfdc.dynamic_layer);
-        let decoded = sfdc.decode(0, text.len() - 1);
-
-        for (i, c) in text.iter().enumerate() {
-            assert_eq!(c, decoded[i]);
-        }
-
-        let decoded = sfdc.decode(0, 0);
-        assert_eq!(&"C", decoded[0]);
-
-        let decoded = sfdc.decode(10, 11);
-        assert_eq!(&"n", decoded[0]);
     }
 
     #[test]
-    fn it_works_long() {
-        let text: Vec<&str> = "The quick brown fox jumps over the lazy dog"
-            .split("")
-            .collect();
+    fn it_decodes_one() {
+        let text: Vec<&str> = "Compression".split("").collect();
         let text = &text[1..text.len() - 1];
-        let n_layers = 3;
-        let mut sfdc = Sfdc::new(&text, n_layers);
 
-        assert_eq!(n_layers, sfdc.layers.len());
+        let layers = 2..=5;
 
-        sfdc.encode();
+        for n in layers {
+            let mut sfdc = Sfdc::new(text, n);
+            sfdc.encode();
 
-        for (k, v) in sfdc.tree.read_codes() {
-            println!("{k} {:?}", v.to_string());
+            for (i, c) in text.iter().enumerate() {
+                assert_eq!(c, sfdc.decode_one(i));
+            }
         }
-
-        for i in 0..n_layers {
-            println!("(layer {i}): {:?}", sfdc.layers[i]);
-        }
-        println!("(layer d): {:?}", sfdc.dynamic_layer);
-
-        let decoded = sfdc.decode(0, text.len());
-
-        for (i, c) in text.iter().enumerate() {
-            assert_eq!(c, decoded[i]);
-        }
-
-        let decoded = sfdc.decode(0, 0);
-        assert_eq!(&"T", decoded[0]);
-
-        let decoded = sfdc.decode(4, 5);
-        assert_eq!(&"q", decoded[0]);
     }
 
     #[test]
     fn it_works_integers() {
-        let text: Vec<u64> = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100_000_000];
         let n_layers = 3;
+
+        let text: Vec<u64> = vec![u64::MIN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, u64::MAX];
         let mut sfdc = Sfdc::new(&text, n_layers);
+        sfdc.encode();
+        let decoded = sfdc.decode_range(0, 0);
+        assert_eq!(&u64::MIN, decoded[0]);
+        let decoded = sfdc.decode_one(text.len());
+        assert_eq!(&u64::MAX, decoded);
 
-        assert_eq!(n_layers, sfdc.layers.len());
+        let text: Vec<i64> = vec![i64::MIN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, i64::MAX];
+        let mut sfdc = Sfdc::new(&text, n_layers);
+        sfdc.encode();
+        let decoded = sfdc.decode_range(0, 0);
+        assert_eq!(&i64::MIN, decoded[0]);
+        let decoded = sfdc.decode_one(text.len());
+        assert_eq!(&i64::MAX, decoded);
 
+        let text: Vec<u32> = vec![u32::MIN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, u32::MAX];
+        let mut sfdc = Sfdc::new(&text, n_layers);
+        sfdc.encode();
+        let decoded = sfdc.decode_range(0, 0);
+        assert_eq!(&u32::MIN, decoded[0]);
+        let decoded = sfdc.decode_one(text.len());
+        assert_eq!(&u32::MAX, decoded);
+
+        let text: Vec<i32> = vec![i32::MIN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, i32::MAX];
+        let mut sfdc = Sfdc::new(&text, n_layers);
+        sfdc.encode();
+        let decoded = sfdc.decode_range(0, 0);
+        assert_eq!(&i32::MIN, decoded[0]);
+        let decoded = sfdc.decode_one(text.len());
+        assert_eq!(&i32::MAX, decoded);
+    }
+
+    #[test]
+    fn it_implements_index() {
+        let text = vec![0, 1, 2, 3, 4];
+        let mut sfdc = Sfdc::new(&text, 3);
         sfdc.encode();
 
-        for (k, v) in sfdc.tree.read_codes() {
-            println!("{k} {:?}", v.to_string());
+        for (i, n) in text.iter().enumerate() {
+            assert_eq!(*n, sfdc[i]);
         }
-
-        for i in 0..n_layers {
-            println!("(layer {i}): {:?}", sfdc.layers[i]);
-        }
-        println!("(layer d): {:?}", sfdc.dynamic_layer);
-
-        let decoded = sfdc.decode(0, 0);
-        assert_eq!(&0, decoded[0]);
-
-        let decoded = sfdc.decode(text.len(), text.len());
-        assert_eq!(&100_000_000, decoded[0]);
     }
 }
