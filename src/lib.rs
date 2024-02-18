@@ -1,17 +1,59 @@
 use bitvec::prelude as bv;
 use huff_coding::prelude::*;
+use mem_dbg::*;
 
 use std::ops::Index;
 
-#[derive(Debug)]
+#[derive(Debug, MemSize)]
 pub struct Sfdc<L: HuffLetter> {
-    text: Vec<L>,
+    len: usize,
     tree: HuffTree<L>,
     layers: Vec<SfdcLayer>,
     dynamic_layer: SfdcLayer,
 }
 
-type SfdcLayer = bv::BitVec;
+#[derive(Debug, Clone)]
+pub struct SfdcLayer(bv::BitVec);
+
+impl SfdcLayer {
+    pub fn new() -> Self {
+        Self(bv::BitVec::new())
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn set(&mut self, index: usize, value: bool) {
+        self.0.set(index, value)
+    }
+
+    pub fn push(&mut self, value: bool) {
+        self.0.push(value)
+    }
+
+    pub fn pop(&mut self) -> Option<bool> {
+        self.0.pop()
+    }
+}
+
+impl Index<usize> for SfdcLayer {
+    type Output = bool;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.0[index]
+    }
+}
+
+impl MemSize for SfdcLayer {
+    fn mem_size(&self, _flags: SizeFlags) -> usize {
+        self.0.as_raw_slice().len() * std::mem::size_of::<usize>()
+    }
+}
+
+impl CopyType for SfdcLayer {
+    type Copy = False;
+}
 
 impl<L: HuffLetter> Sfdc<L> {
     pub fn new(text: &[L], layers: usize) -> Self {
@@ -28,24 +70,28 @@ impl<L: HuffLetter> Sfdc<L> {
             layers
         };
 
-        let layers = vec![SfdcLayer::repeat(false, text.len()); layers];
+        let layers = vec![SfdcLayer(bv::BitVec::repeat(false, text.len())); layers];
 
-        Self {
-            text: text.into(),
+        let mut sfdc = Self {
+            len: layers[0].len(),
             tree,
             layers,
             // TODO: Better to allocate a bigger chunk now? We could probably guess at that based
             // on the number of layers requested, and the frequency of characters with coes longer
             // than the number of layers...
-            dynamic_layer: SfdcLayer::repeat(false, text.len()),
-        }
+            dynamic_layer: SfdcLayer(bv::BitVec::repeat(false, text.len())),
+        };
+
+        sfdc.encode(text);
+
+        sfdc
     }
 
-    pub fn encode(&mut self) {
+    fn encode(&mut self, text: &[L]) {
         let codes = self.tree.read_codes();
         let mut pending = SfdcLayer::new();
 
-        for (i, c) in self.text.iter().enumerate() {
+        for (i, c) in text.iter().enumerate() {
             let code = &codes[c];
             let fixed_idx = std::cmp::min(code.len(), self.layers.len());
 
@@ -72,17 +118,13 @@ impl<L: HuffLetter> Sfdc<L> {
     }
 
     pub fn decode_range(&self, start: usize, end: usize) -> Vec<&L> {
-        let start = if start >= self.text.len() {
-            self.text.len() - 1
+        let start = if start >= self.len {
+            self.len - 1
         } else {
             start
         };
 
-        let end = if end >= self.text.len() {
-            self.text.len() - 1
-        } else {
-            end
-        };
+        let end = if end >= self.len { self.len - 1 } else { end };
 
         let expected = std::cmp::max(1, (end - start) + 1);
         let mut pending = Vec::new();
@@ -91,7 +133,7 @@ impl<L: HuffLetter> Sfdc<L> {
         let mut found = 0;
 
         while found < expected {
-            if k < self.text.len() {
+            if k < self.len {
                 let mut x = self.tree.root();
                 let mut h = 0;
                 while h < self.layers.len() && x.has_children() {
@@ -160,8 +202,7 @@ mod tests {
                 let text: Vec<&str> = t.split("").collect();
                 let text = &text[1..text.len() - 1];
 
-                let mut sfdc = Sfdc::new(text, n);
-                sfdc.encode();
+                let sfdc = Sfdc::new(text, n);
 
                 let decoded = sfdc.decode_range(0, text.len());
                 for (i, c) in text.iter().enumerate() {
@@ -179,8 +220,7 @@ mod tests {
         let layers = 2..=5;
 
         for n in layers {
-            let mut sfdc = Sfdc::new(text, n);
-            sfdc.encode();
+            let sfdc = Sfdc::new(text, n);
 
             for (i, c) in text.iter().enumerate() {
                 assert_eq!(c, sfdc.decode_one(i));
@@ -193,32 +233,28 @@ mod tests {
         let n_layers = 3;
 
         let text: Vec<u64> = vec![u64::MIN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, u64::MAX];
-        let mut sfdc = Sfdc::new(&text, n_layers);
-        sfdc.encode();
+        let sfdc = Sfdc::new(&text, n_layers);
         let decoded = sfdc.decode_range(0, 0);
         assert_eq!(&u64::MIN, decoded[0]);
         let decoded = sfdc.decode_one(text.len());
         assert_eq!(&u64::MAX, decoded);
 
         let text: Vec<i64> = vec![i64::MIN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, i64::MAX];
-        let mut sfdc = Sfdc::new(&text, n_layers);
-        sfdc.encode();
+        let sfdc = Sfdc::new(&text, n_layers);
         let decoded = sfdc.decode_range(0, 0);
         assert_eq!(&i64::MIN, decoded[0]);
         let decoded = sfdc.decode_one(text.len());
         assert_eq!(&i64::MAX, decoded);
 
         let text: Vec<u32> = vec![u32::MIN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, u32::MAX];
-        let mut sfdc = Sfdc::new(&text, n_layers);
-        sfdc.encode();
+        let sfdc = Sfdc::new(&text, n_layers);
         let decoded = sfdc.decode_range(0, 0);
         assert_eq!(&u32::MIN, decoded[0]);
         let decoded = sfdc.decode_one(text.len());
         assert_eq!(&u32::MAX, decoded);
 
         let text: Vec<i32> = vec![i32::MIN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, i32::MAX];
-        let mut sfdc = Sfdc::new(&text, n_layers);
-        sfdc.encode();
+        let sfdc = Sfdc::new(&text, n_layers);
         let decoded = sfdc.decode_range(0, 0);
         assert_eq!(&i32::MIN, decoded[0]);
         let decoded = sfdc.decode_one(text.len());
@@ -228,8 +264,7 @@ mod tests {
     #[test]
     fn it_implements_index() {
         let text = vec![0, 1, 2, 3, 4];
-        let mut sfdc = Sfdc::new(&text, 3);
-        sfdc.encode();
+        let sfdc = Sfdc::new(&text, 3);
 
         for (i, n) in text.iter().enumerate() {
             assert_eq!(*n, sfdc[i]);
