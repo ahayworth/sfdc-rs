@@ -1,13 +1,16 @@
+mod huffman;
+
 use bitvec::prelude as bv;
-use huff_coding::prelude::*;
 use mem_dbg::*;
+
+use huffman::*;
 
 use std::ops::Index;
 
-#[derive(Debug, MemSize)]
-pub struct Sfdc<L: HuffLetter> {
+#[derive(Clone, Debug, MemSize)]
+pub struct Sfdc {
     len: usize,
-    tree: HuffTree<L>,
+    tree: HuffmanTree,
     layers: Vec<SfdcLayer>,
     dynamic_layer: SfdcLayer,
 }
@@ -55,22 +58,20 @@ impl CopyType for SfdcLayer {
     type Copy = False;
 }
 
-impl<L: HuffLetter> Sfdc<L> {
-    pub fn new(text: &[L], layers: usize) -> Self {
-        let weights = build_weights_map(text);
-        let tree = HuffTree::from_weights(weights);
-        let codes = tree.read_codes();
+impl Sfdc {
+    pub fn new(text: &[u8], layers: usize) -> Self {
+        let tree = HuffmanTree::new(text);
+        // let codes = tree.read_codes();
+        // let max_code_length = codes.values().map(|v| v.len()).max().unwrap();
+        // let layers = if layers <= 1 {
+        //     2
+        // } else if layers > max_code_length {
+        //     max_code_length
+        // } else {
+        //     layers
+        // };
 
-        let max_code_length = codes.values().map(|v| v.len()).max().unwrap();
-        let layers = if layers <= 1 {
-            2
-        } else if layers > max_code_length {
-            max_code_length
-        } else {
-            layers
-        };
-
-        let layers = vec![SfdcLayer(bv::BitVec::repeat(false, text.len())); layers];
+        let layers = vec![SfdcLayer(bv::BitVec::repeat(false, text.len())); layers.max(2)];
 
         let mut sfdc = Self {
             len: layers[0].len(),
@@ -87,20 +88,20 @@ impl<L: HuffLetter> Sfdc<L> {
         sfdc
     }
 
-    fn encode(&mut self, text: &[L]) {
-        let codes = self.tree.read_codes();
+    fn encode(&mut self, text: &[u8]) {
+        // let codes = self.tree.read_codes();
         let mut pending = SfdcLayer::new();
 
         for (i, c) in text.iter().enumerate() {
-            let code = &codes[c];
+            let code = self.tree.get_code(*c);
             let fixed_idx = std::cmp::min(code.len(), self.layers.len());
 
             for j in 0..fixed_idx {
-                self.layers[j].set(i, code[j]);
+                self.layers[j].set(i, code[j] == 1);
             }
 
             for j in (fixed_idx..code.len()).rev() {
-                pending.push(code[j]);
+                pending.push(code[j] == 1);
             }
 
             if let Some(b) = pending.pop() {
@@ -113,11 +114,11 @@ impl<L: HuffLetter> Sfdc<L> {
         }
     }
 
-    pub fn decode_one(&self, index: usize) -> &L {
+    pub fn decode_one(&self, index: usize) -> u8 {
         self.decode_range(index, index)[0]
     }
 
-    pub fn decode_range(&self, start: usize, end: usize) -> Vec<&L> {
+    pub fn decode_range(&self, start: usize, end: usize) -> Vec<u8> {
         let start = if start >= self.len {
             self.len - 1
         } else {
@@ -128,28 +129,28 @@ impl<L: HuffLetter> Sfdc<L> {
 
         let expected = std::cmp::max(1, (end - start) + 1);
         let mut pending = Vec::new();
-        let mut results: Vec<Option<&L>> = vec![None; expected];
+        let mut results: Vec<Option<u8>> = vec![None; expected];
         let mut k = start;
         let mut found = 0;
 
         while found < expected {
             if k < self.len {
-                let mut x = self.tree.root();
+                let mut x = self.tree.tree[self.tree.root];
                 let mut h = 0;
-                while h < self.layers.len() && x.has_children() {
+                while h < self.layers.len() && (x.left.is_some() || x.right.is_some()) {
                     if self.layers[h][k] {
-                        x = x.right_child().unwrap();
+                        x = self.tree.tree[x.left.unwrap()];
                     } else {
-                        x = x.left_child().unwrap();
+                        x = self.tree.tree[x.right.unwrap()];
                     }
 
                     h += 1;
                 }
 
-                if !x.has_children() {
+                if x.left.is_none() && x.right.is_none() {
                     if k <= end {
                         found += 1;
-                        results[k - start] = x.leaf().letter();
+                        results[k - start] = Some(self.tree.tree[x.index].index as u8);
                     }
                 } else {
                     pending.push((x, k));
@@ -158,15 +159,15 @@ impl<L: HuffLetter> Sfdc<L> {
 
             if let Some((mut x, p)) = pending.pop() {
                 if self.dynamic_layer[k] {
-                    x = x.right_child().unwrap();
+                    x = self.tree.tree[x.left.unwrap()];
                 } else {
-                    x = x.left_child().unwrap();
+                    x = self.tree.tree[x.right.unwrap()];
                 }
 
-                if !x.has_children() {
+                if x.left.is_none() && x.right.is_none() {
                     if p <= end {
                         found += 1;
-                        results[p - start] = x.leaf().letter();
+                        results[p - start] = Some(x.index as u8);
                     }
                 } else {
                     pending.push((x, p));
@@ -180,12 +181,12 @@ impl<L: HuffLetter> Sfdc<L> {
     }
 }
 
-impl<L: HuffLetter> Index<usize> for Sfdc<L> {
-    type Output = L;
-    fn index(&self, index: usize) -> &Self::Output {
-        self.decode_one(index)
-    }
-}
+// impl Index<usize> for Sfdc {
+//     type Output = u8;
+//     fn index(&self, index: usize) -> &Self::Output {
+//         self.decode_one(index)
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
@@ -199,14 +200,12 @@ mod tests {
 
         for n in layers {
             for t in &texts {
-                let text: Vec<&str> = t.split("").collect();
-                let text = &text[1..text.len() - 1];
-
+                let text = t.as_bytes();
                 let sfdc = Sfdc::new(text, n);
 
                 let decoded = sfdc.decode_range(0, text.len());
                 for (i, c) in text.iter().enumerate() {
-                    assert_eq!(c, decoded[i]);
+                    assert_eq!(*c, decoded[i]);
                 }
             }
         }
@@ -214,60 +213,58 @@ mod tests {
 
     #[test]
     fn it_decodes_one() {
-        let text: Vec<&str> = "Compression".split("").collect();
-        let text = &text[1..text.len() - 1];
-
+        let text = "Compression".as_bytes();
         let layers = 2..=5;
 
         for n in layers {
             let sfdc = Sfdc::new(text, n);
 
             for (i, c) in text.iter().enumerate() {
-                assert_eq!(c, sfdc.decode_one(i));
+                assert_eq!(*c, sfdc.decode_one(i));
             }
         }
     }
 
-    #[test]
-    fn it_works_integers() {
-        let n_layers = 3;
+    // #[test]
+    // fn it_works_integers() {
+    //     let n_layers = 3;
+    //
+    //     let text: Vec<u64> = vec![u64::MIN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, u64::MAX];
+    //     let sfdc = Sfdc::new(&text, n_layers);
+    //     let decoded = sfdc.decode_range(0, 0);
+    //     assert_eq!(&u64::MIN, decoded[0]);
+    //     let decoded = sfdc.decode_one(text.len());
+    //     assert_eq!(&u64::MAX, decoded);
+    //
+    //     let text: Vec<i64> = vec![i64::MIN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, i64::MAX];
+    //     let sfdc = Sfdc::new(&text, n_layers);
+    //     let decoded = sfdc.decode_range(0, 0);
+    //     assert_eq!(&i64::MIN, decoded[0]);
+    //     let decoded = sfdc.decode_one(text.len());
+    //     assert_eq!(&i64::MAX, decoded);
+    //
+    //     let text: Vec<u32> = vec![u32::MIN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, u32::MAX];
+    //     let sfdc = Sfdc::new(&text, n_layers);
+    //     let decoded = sfdc.decode_range(0, 0);
+    //     assert_eq!(&u32::MIN, decoded[0]);
+    //     let decoded = sfdc.decode_one(text.len());
+    //     assert_eq!(&u32::MAX, decoded);
+    //
+    //     let text: Vec<i32> = vec![i32::MIN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, i32::MAX];
+    //     let sfdc = Sfdc::new(&text, n_layers);
+    //     let decoded = sfdc.decode_range(0, 0);
+    //     assert_eq!(&i32::MIN, decoded[0]);
+    //     let decoded = sfdc.decode_one(text.len());
+    //     assert_eq!(&i32::MAX, decoded);
+    // }
 
-        let text: Vec<u64> = vec![u64::MIN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, u64::MAX];
-        let sfdc = Sfdc::new(&text, n_layers);
-        let decoded = sfdc.decode_range(0, 0);
-        assert_eq!(&u64::MIN, decoded[0]);
-        let decoded = sfdc.decode_one(text.len());
-        assert_eq!(&u64::MAX, decoded);
-
-        let text: Vec<i64> = vec![i64::MIN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, i64::MAX];
-        let sfdc = Sfdc::new(&text, n_layers);
-        let decoded = sfdc.decode_range(0, 0);
-        assert_eq!(&i64::MIN, decoded[0]);
-        let decoded = sfdc.decode_one(text.len());
-        assert_eq!(&i64::MAX, decoded);
-
-        let text: Vec<u32> = vec![u32::MIN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, u32::MAX];
-        let sfdc = Sfdc::new(&text, n_layers);
-        let decoded = sfdc.decode_range(0, 0);
-        assert_eq!(&u32::MIN, decoded[0]);
-        let decoded = sfdc.decode_one(text.len());
-        assert_eq!(&u32::MAX, decoded);
-
-        let text: Vec<i32> = vec![i32::MIN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, i32::MAX];
-        let sfdc = Sfdc::new(&text, n_layers);
-        let decoded = sfdc.decode_range(0, 0);
-        assert_eq!(&i32::MIN, decoded[0]);
-        let decoded = sfdc.decode_one(text.len());
-        assert_eq!(&i32::MAX, decoded);
-    }
-
-    #[test]
-    fn it_implements_index() {
-        let text = vec![0, 1, 2, 3, 4];
-        let sfdc = Sfdc::new(&text, 3);
-
-        for (i, n) in text.iter().enumerate() {
-            assert_eq!(*n, sfdc[i]);
-        }
-    }
+    // #[test]
+    // fn it_implements_index() {
+    //     let text = vec![0, 1, 2, 3, 4];
+    //     let sfdc = Sfdc::new(&text, 3);
+    //
+    //     for (i, n) in text.iter().enumerate() {
+    //         assert_eq!(*n, sfdc[i]);
+    //     }
+    // }
 }
