@@ -4,9 +4,9 @@ use sfdc::*;
 fn criterion_benchmark(c: &mut Criterion) {
     let texts = vec![
         "Compression",
-        // "Absolute power corrupts absolutely",
-        // "The quick brown fox jumped over the lazy dog",
-        // "Those who cannot remember the past are condemned to repeat it",
+        "Absolute power corrupts absolutely",
+        "The quick brown fox jumped over the lazy dog",
+        "Those who cannot remember the past are condemned to repeat it",
     ];
 
     let inputs = texts

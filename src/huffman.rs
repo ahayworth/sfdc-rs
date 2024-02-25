@@ -1,11 +1,14 @@
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+
+// TODO: use a different hasher maybe
+use std::collections::{BinaryHeap, HashMap};
 
 use mem_dbg::*;
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, MemSize, MemDbg)]
 pub(crate) struct HuffmanNode {
     pub(crate) count: usize,
+    pub(crate) symbol: Option<u8>,
     pub(crate) index: usize,
     pub(crate) parent: Option<usize>,
     pub(crate) left: Option<usize>,
@@ -16,28 +19,34 @@ pub(crate) struct HuffmanNode {
 pub(crate) struct HuffmanTree {
     pub(crate) root: usize,
     pub(crate) tree: Vec<HuffmanNode>,
+    pub(crate) symbols: HashMap<u8, usize>,
 }
 
 impl HuffmanTree {
     pub(crate) fn new(input: &[u8]) -> HuffmanTree {
-        let mut tree: Vec<HuffmanNode> = (0..u8::MAX as usize)
-            .map(|i| HuffmanNode {
-                index: i,
-                ..Default::default()
-            })
-            .collect();
+        let mut symbols: HashMap<u8, usize> = HashMap::new();
 
-        for t in input {
-            let i: usize = usize::from(*t);
-            tree[i].count += 1;
-            tree[i].index = i;
+        for c in input {
+            symbols.entry(*c).and_modify(|n| *n += 1).or_insert(1);
         }
 
-        let mut heap = BinaryHeap::from_iter(
-            tree.iter()
-                .filter(|n| n.count > 0)
-                .map(|n| Reverse(n.clone())),
-        );
+        let mut tree: Vec<HuffmanNode> =
+            Vec::from_iter(symbols.iter().map(|(symbol, count)| HuffmanNode {
+                count: *count,
+                symbol: Some(*symbol),
+                ..Default::default()
+            }));
+
+        // TODO is this a good idea? idk... which way should we really sort?
+        tree.sort_unstable();
+
+        symbols.clear();
+        let mut heap = BinaryHeap::with_capacity(tree.len());
+        for (i, hn) in tree.iter_mut().enumerate() {
+            hn.index = i;
+            symbols.insert(hn.symbol.unwrap(), i);
+            heap.push(Reverse(hn.clone()));
+        }
 
         while heap.len() > 1 {
             let n1 = heap.pop().unwrap().0;
@@ -58,19 +67,23 @@ impl HuffmanTree {
         }
 
         let root = heap.pop().unwrap().0;
-
         tree.shrink_to_fit();
 
+        // for (i, t) in tree.iter().enumerate() {
+        //     println!("{i}, {t:?}");
+        // }
+        //
         HuffmanTree {
             root: root.index,
             tree,
+            symbols,
         }
     }
 
     pub(crate) fn get_code(&self, byte: u8) -> Vec<u8> {
         // println!("get_code: {byte:?}");
         let mut output = Vec::new();
-        let mut node = self.tree[usize::from(byte)];
+        let mut node = self.tree[self.symbols[&byte]];
 
         loop {
             // println!("{node:?}");
@@ -102,7 +115,7 @@ impl HuffmanTree {
             }
         }
 
-        return idx as u8;
+        self.tree[idx].symbol.unwrap()
     }
 }
 
@@ -111,24 +124,19 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    // TODO: test prefix table matches expectations
-
     #[test]
     fn it_works() {
         let text = "so much words wow many compression";
         let tree = HuffmanTree::new(text.as_bytes());
+        tree.mem_dbg(DbgFlags::default()).unwrap();
         let chars: HashSet<&str> = HashSet::from_iter(text.split("").filter(|c| *c != ""));
 
         for c in chars {
             let actual_byte = c.as_bytes()[0];
             let actual_code = tree.get_code(actual_byte);
             let decoded_byte = tree.decode(&actual_code);
-            println!("c={c:?}, actual_byte={actual_byte:?}, decoded_byte={decoded_byte:?}, actual_code={actual_code:?}");
+            // println!("c={c:?}, actual_byte={actual_byte:?}, decoded_byte={decoded_byte:?}, actual_code={actual_code:?}");
             assert_eq!(actual_byte, decoded_byte);
         }
-
-        println!("{:?}", tree.mem_size(SizeFlags::default()));
-        println!("{:?}", text.mem_size(SizeFlags::default()));
-        tree.mem_dbg(DbgFlags::default()).unwrap();
     }
 }

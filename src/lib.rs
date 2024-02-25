@@ -1,13 +1,12 @@
 mod huffman;
 
 use bitvec::prelude as bv;
-use mem_dbg::*;
 
 use huffman::*;
 
 use std::ops::Index;
 
-#[derive(Clone, Debug, MemSize)]
+#[derive(Clone, Debug)]
 pub struct Sfdc {
     len: usize,
     tree: HuffmanTree,
@@ -46,16 +45,6 @@ impl Index<usize> for SfdcLayer {
     fn index(&self, index: usize) -> &Self::Output {
         &self.0[index]
     }
-}
-
-impl MemSize for SfdcLayer {
-    fn mem_size(&self, _flags: SizeFlags) -> usize {
-        self.0.as_raw_slice().len() * std::mem::size_of::<usize>()
-    }
-}
-
-impl CopyType for SfdcLayer {
-    type Copy = False;
 }
 
 impl Sfdc {
@@ -150,7 +139,7 @@ impl Sfdc {
                 if x.left.is_none() && x.right.is_none() {
                     if k <= end {
                         found += 1;
-                        results[k - start] = Some(self.tree.tree[x.index].index as u8);
+                        results[k - start] = x.symbol
                     }
                 } else {
                     pending.push((x, k));
@@ -167,7 +156,7 @@ impl Sfdc {
                 if x.left.is_none() && x.right.is_none() {
                     if p <= end {
                         found += 1;
-                        results[p - start] = Some(x.index as u8);
+                        results[p - start] = x.symbol
                     }
                 } else {
                     pending.push((x, p));
